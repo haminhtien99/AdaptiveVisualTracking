@@ -1,80 +1,78 @@
-import numpy as np
 import cv2
+import os
+import time
+from adaptive_tracker import MyTracker
 
-from typing import Tuple
-
-from kalman_filter import KalmanFilter
-from appearence_model import PatchBox, AppearanceModel, CandidateSet
-
-class Tracker:
-    def __init__(self, bbox: Tuple[int], control_parameters: dict):
-        self.control_parameters = control_parameters
-        self.obj = PatchBox(bbox)
-        self.appearance_model = AppearanceModel(
-            PP_threshold=control_parameters['PP_threshold'],
-            NP_threshold=control_parameters['NP_threshold'],
-        )
-        self.motion_model = KalmanFilter(init_bbox=bbox)
-
-    def track(self, TD_threshold, frame: np.ndarray):
-
-        self.appearance_model.generate_patches(frame=frame, obj=self.obj)
-        patches = self.appearance_model.get_patches()
-
-        candidate_set = CandidateSet(
-            obj=self.obj,
-            frame=frame,
-            CA_threshold=self.control_parameters['CA_threshold']
-            )
-        candidate_set.calculate_CS_weak(
-            patches=patches,
-            WC_threshold=self.control_parameters['WC_threshold']
-        )
-
-        pred_key, pred_weak_bbox = candidate_set.predict_bbox()
-        pred_motion_bbox = self.motion_model.predict()
-        if pred_weak_bbox is not None:
-            if pred_motion_bbox is not None:
-                TD = tolerabel_distance(pred_motion_bbox, pred_weak_bbox)
-                if TD < TD_threshold:
-                    self.motion_model.update(pred_motion_bbox)
-                    optimal_bbox = self.motion_model.get_bbox()
-                    self.obj.update(optimal_bbox)
-                else:
-                    candidate_set.calculate_CS_strong(self.control_parameters['SC_threshold'])
-                    pred_strong_bbox = candidate_set.predict_bbox_strong(except_key=pred_key)
-                    if pred_strong_bbox is not None:
-                        self.motion_model.update(pred_strong_bbox)
-                        optimal_bbox = self.motion_model.get_bbox()
-                        self.obj.update(optimal_bbox)
-            else:
-                self.motion_model = KalmanFilter(init_bbox=pred_weak_bbox) # reset motion tracker
-                self.obj.update(pred_weak_bbox)
-        elif pred_motion_bbox is not None:
-            self.obj.update(pred_motion_bbox)
-            self.appearance_model.del_pos_patches()
-        else:
-            candidate_set.calculate_CS_strong(self.control_parameters['SC_threshold'])
-            pred_strong_bbox = candidate_set.predict_bbox_strong(except_key=pred_key)
-            if pred_strong_bbox is not None:
-                self.motion_model = KalmanFilter(init_bbox=pred_strong_bbox) # reset motion tracker
-                self.obj.update(pred_strong_bbox)
-            else:
-                print('Fail tracking')
-
-def tolerabel_distance(bbox1, bbox2):
-    x1, y1, w1, h1 = bbox1
-    x2, y2, w2, h2 = bbox2
-    dist = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
-    w_avg = float(w1 - w2)
-    h_avg = float(h1 - h2)
-    return dist/(w_avg + h_avg)
+trackers_dict = {
+    "csrt": cv2.legacy.TrackerCSRT_create,
+	"kcf": cv2.legacy.TrackerKCF_create,
+	"boosting": cv2.legacy.TrackerBoosting_create,
+	"mil": cv2.legacy.TrackerMIL_create,
+	"tld": cv2.legacy.TrackerTLD_create,
+	"medianflow": cv2.legacy.TrackerMedianFlow_create,
+	"mosse": cv2.legacy.TrackerMOSSE_create, 
+    "custom": MyTracker
+	}
 
 Parameters = {
-    'WC_threshold': 0.47,   # Threshold score for a weak confidence candidate decision
-    'TD_threshold': 0.69,   # Tolerable distance between the motion- and model-based trackers
+    'WC_threshold': 0.51,   # Threshold score for a weak confidence candidate decision
+    'TD_threshold': 0.5,   # Tolerable distance between the motion- and model-based trackers
     'CA_threshold': 0.63,   # Threshold for a candidate area decision
     'NP_threshold': 0.70,   # Threshold for a negative patch determination
     'PP_threshold': 0.38,   # Threshold for a positive patch determination
     'SC_threshold': 0.61    # Threshold score for a strong confidence candidate decision
 }
+
+
+def show_position(bbox_roi, frame):
+    red = (0, 0, 255)
+    green = (0, 255, 0)
+    blue = (255, 0, 0)
+    height, width, _ = frame.shape
+    center_x, center_y = width // 2, height // 2
+
+    cv2.line(frame, (width // 2, 0), (width // 2, height), green, 2)
+    cv2.line(frame, (0, height // 2), (width, height // 2), green, 2)
+
+    if bbox_roi is not None:
+        x, y, w, h = map(int, bbox_roi)
+        xc, yc = x + w//2, y + h//2
+        cv2.putText(frame, f"({xc - center_x}, {center_y - yc})", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, blue, 2)
+        cv2.circle(frame, (xc, yc), 5, red, -1)
+        cv2.arrowedLine(frame, (center_x, center_y), (xc, yc), red, 2, tipLength=0.1)
+
+
+tracker = trackers_dict['custom'](Parameters)
+# tracker = trackers_dict['csrt']()
+cap = cv2.VideoCapture('tank1.mp4')
+ret, frame = cap.read()
+if not ret:
+    print("Failed to read video")
+    cap.release()
+    exit()
+bbox = cv2.selectROI("Select Object", frame, False)
+tracker.init(frame, bbox)
+while True:
+    tick = cv2.getTickCount()
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    success, bbox = tracker.update(frame)
+    time_taken = (cv2.getTickCount() - tick) / cv2.getTickFrequency()
+    fps = 1 / time_taken
+    if success:
+        x, y, w, h = map(int, bbox)
+        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+        cv2.putText(frame, "FPS : " + str(int(fps)), (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        show_position(bbox, frame)
+    else:
+        cv2.putText(frame, "Tracking Lost", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+        show_position(None, frame)
+
+    cv2.imshow("Tracking", frame)
+
+    if cv2.waitKey(20) & 0xFF == ord('q'):
+        break
+cap.release()
+cv2.destroyAllWindows()

@@ -13,7 +13,7 @@ class KalmanFilter:
         self._std_weight_velocity = 1. / 160
         
         self.mean, self.covariance = self._initiate(np.array(bbox))
-    
+
     def _initiate(self, measurement):
         mean_pos = measurement
         mean_vel = np.zeros_like(mean_pos)
@@ -82,4 +82,3 @@ class KalmanFilter:
     
     def get_bbox(self):
         return self.mean[:4].tolist()
-
