@@ -29,7 +29,7 @@ class PatchBox:
         theta = self.theta
         theta += np.arctan2(new_bbox[1] - self.yc, new_bbox[0] - self.xc)
         theta /= 2
-        if theta < 0: theta = np.pi - theta
+        if theta < 0: theta = 2* np.pi + theta
         if theta > 2 * np.pi: theta = theta - 2 * np.pi
         self.xc = int(new_bbox[0])
         self.yc = int(new_bbox[1])
@@ -48,29 +48,35 @@ class AppearanceModel:
         self,
         PP_threshold: float=0.38,
         NP_threshold: float=0.70,
-        max_len=10
+        max_len=5,
+        warp_g: Tuple[float] = (0.2, 0.1, 0.5, -0.3)
         ):
         self.NP_threshold = NP_threshold
         self.PP_threshold = PP_threshold
         self.max_len = max_len
-        self.pos_patches = []
-        self.neg_patches = []
+        self.pos_patches = deque(maxlen=4)
+        self.neg_patches = deque(maxlen=4)
+        g1, g2, g3, g4 = warp_g
+        self.M_affine = np.array(
+            [[1 + g1, -g2, g3],
+             [g2, 1 + g1, g4]],
+            dtype=np.float32
+        )
     def generate_patches(self, frame: np.ndarray, obj: PatchBox):
         """
         Generates patches, filtering out patches
         """
         # crop the patches
-        cropped_pos, cropped_neg = self.generate_cropped_patches(frame=frame, obj=obj)
+        cropped_pos, cropped_neg = self._generate_cropped_patches(frame=frame, obj=obj)
         # warp Transformation
-        warp_transform_pos = warp_transform(cropped_pos)
-        warp_transform_neg = warp_transform(cropped_neg)
+        warp_pos = [cv2.warpAffine(img, self.M_affine, (img.shape[1], img.shape[0]), 
+                    flags=cv2.INTER_LINEAR, borderValue=(0,0,0)) for img in cropped_pos]
+        warp_neg = [cv2.warpAffine(img, self.M_affine, (img.shape[1], img.shape[0]), 
+                    flags=cv2.INTER_LINEAR, borderValue=(0,0,0)) for img in cropped_neg]
         # Filter patches
-        self.filter(
-            new_positive_patches=warp_transform_pos,
-            new_negative_patches=warp_transform_neg
-            )
-    def generate_cropped_patches(self, frame: np.ndarray, obj: PatchBox):
-        # generate max_len crop images from the optimal state
+        self._filter(warp_pos, warp_neg)
+    def _generate_cropped_patches(self, frame: np.ndarray, obj: PatchBox):
+     # generate max_len crop images from the optimal state
         optimal_state = obj.state
         w, h = obj.w, obj.h
         cropped_pos = []
@@ -109,16 +115,10 @@ class AppearanceModel:
                 crop = crop_image_from_state(possiable_state, obj, frame)
                 cropped_neg.append(crop)
         return cropped_pos, cropped_neg
-
-    def filter(self, new_positive_patches, new_negative_patches):
-        # criteria: patches include positive and negative, each of them include N list-patches from history
-        N = 4
-        self.pos_patches.append(new_positive_patches)
-        self.neg_patches.append(new_negative_patches)
-        if len(self.pos_patches) > N:
-            del(self.pos_patches[0])
-        if len(self.neg_patches) > N:
-            del(self.neg_patches[0])
+    
+    def _filter(self, new_pos, new_neg):
+        self.pos_patches.append(new_pos)
+        self.neg_patches.append(new_neg)
 
     def get_patches(self):
         flatten_pos_patches = [patch for patches in self.pos_patches for patch in patches]
@@ -126,7 +126,7 @@ class AppearanceModel:
         return [flatten_pos_patches, flatten_neg_patches]
 
     def del_pos_patches(self):
-        self.pos_patches = []
+        self.pos_patches.clear()
 
 def crop_image_from_state(state, object: PatchBox, image: np.ndarray):
     w, h = object.w, object.h
@@ -141,7 +141,7 @@ def crop_image_from_state(state, object: PatchBox, image: np.ndarray):
 def warp_transform(images, g=(0.2, 0.1, 0.5, -0.3)):
     g1, g2, g3, g4 = g
     M_affine = np.array(
-        [[1 + g1, -g2, g3],
+        [[1 + g1, -g2, g3], 
         [g2, 1 + g1, g4]],
         dtype=np.float32
         )
@@ -157,33 +157,81 @@ def warp_transform(images, g=(0.2, 0.1, 0.5, -0.3)):
     return warp_images
 class CandidateSet:
     def __init__(self, obj: PatchBox, frame: np.ndarray, CA_threshold: float):
-        self.init_canndidate_set = {}  # includes bbox information and crop_image
-        self.CS_weak = None # the confidence score
-        self.C_weak = {}  # the weak condidate set dictionary of pairs (id, CS_weak)
-        self.CS_weak = None
-        self.C_strong = {}
-        self.init_set(obj, CA_threshold, frame)
+        
         self.w = obj.w
         self.h = obj.h
-    def init_set(self, obj: PatchBox, CA_threshold, frame: np.ndarray, num_candidates = 20):
-        xc, yc, w, h = obj.xc, obj.yc, obj.w, obj.h
-        bbox = [xc, yc, w, h]
-        img_height, img_width = frame.shape[:2]
-        new_bboxes = []
-        crop_candidates = []
-        while len(new_bboxes) < num_candidates:
-            new_xc = max(w//2, min(img_width - w//2, xc + random.randint(-w//2, w//2)))
-            new_yc = max(h//2, min(img_height - h//2, yc + random.randint(-h//2, h//2)))
-            new_w = max(5, min(img_width, w + random.randint(-w//2, w//2)))
-            new_h = max(5, min(img_height, h + random.randint(-h//2, h//2)))
-            new_bbox = [new_xc, new_yc, new_w, new_h]
-            iou = compute_iou(new_bbox, bbox)
-            if iou > CA_threshold:
-                new_bboxes.append(new_bbox)
-                crop = frame[new_yc - new_h//2: new_yc + new_h//2,
-                             new_xc - new_w//2: new_xc + new_w//2]
-                crop_candidates.append(crop)
-        self.init_canndidate_set = {'bbox': new_bboxes, 'patches': crop_candidates}
+        _, _, d = frame.shape
+        self.num_candidates = 10
+        self.init_boxes = np.zeros((self.num_candidates, 4), dtype=np.int32)
+        self.init_img = np.zeros((self.num_candidates, self.h, self.w, d), dtype=np.float32)
+        self.CS_weak = np.zeros(self.num_candidates, dtype=np.float32) # the confidence score
+        self.CS_strong
+        bbox = [obj.xc, obj.yc, obj.w, obj.h]
+        bbox_xyxy = self._to_xyxy(bbox)
+        self.init_set(bbox_xyxy, CA_threshold, frame)
+        
+    def _to_xyxy(self, original_box):
+        xc, yc, w, h = original_box
+        x1, y1 = xc - w/2, yc - h/2
+        x2, y2 = xc + w/2, yc + h/2
+        return [x1, y1, x2, y2]
+    def init_set(self, xyxy, CA_threshold, frame):
+        def generate_perturbed_box(original_box, alpha=0.1, beta=0.1):
+            cx = (original_box[0] + original_box[2]) / 2
+            cy = (original_box[1] + original_box[3]) / 2
+            w = original_box[2] - original_box[0]
+            h = original_box[3] - original_box[1]
+            
+            # Nhiễu tâm và kích thước
+            delta_x = np.random.uniform(-alpha * w, alpha * w)
+            delta_y = np.random.uniform(-alpha * h, alpha * h)
+            new_w = w * np.random.uniform(1 - beta, 1 + beta)
+            new_h = h * np.random.uniform(1 - beta, 1 + beta)
+            
+            # Tạo bounding box mới
+            new_cx = cx + delta_x
+            new_cy = cy + delta_y
+            x1 = new_cx - new_w / 2
+            y1 = new_cy - new_h / 2
+            x2 = new_cx + new_w / 2
+            y2 = new_cy + new_h / 2
+            
+            return [x1, y1, x2, y2]
+
+        def generate_boxes(original_box, iou_threshold=0.7, num_boxes=10, max_attempts=100):
+            generated_boxes = []
+            attempts = 0
+            while len(generated_boxes) < num_boxes and attempts < max_attempts:
+                perturbed_box = generate_perturbed_box(original_box)
+                iou = compute_iou(original_box, perturbed_box)
+                if iou >= iou_threshold:
+                    generated_boxes.append(perturbed_box)
+                attempts += 1
+            return generated_boxes
+
+        def compute_iou(box1, box2):
+            # Tính diện tích giao nhau và hợp nhất
+            x1_inter = max(box1[0], box2[0])
+            y1_inter = max(box1[1], box2[1])
+            x2_inter = min(box1[2], box2[2])
+            y2_inter = min(box1[3], box2[3])
+            
+            area_inter = max(0, x2_inter - x1_inter) * max(0, y2_inter - y1_inter)
+            
+            area_box1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+            area_box2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+            area_union = area_box1 + area_box2 - area_inter
+            
+            return area_inter / area_union if area_union > 0 else 0
+        bboxes = generate_boxes(xyxy, CA_threshold, self.num_candidates, 100)
+        for i, box in enumerate(bboxes):
+            x1, y1, x2, y2 = box
+            x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+            crop_img = frame[y1: y2, x1: x2,:]
+            resize_img = cv2.resize(crop_img, (self.w, self.h))
+            self.init_img[i, :, :, :](resize_img)
+            self.init_boxes[i, :] = np.array(box)
+
     def calculate_CS_weak(self, patches: list[list[np.ndarray]], WC_threshold):
         "Calculates the weak confience score"
         # resize all patches to [w, h, ...]
@@ -191,36 +239,26 @@ class CandidateSet:
         pos_patches, neg_patches = patches[0], patches[1]
         converted_pos_patches = self.convert_patch(pos_patches)
         converted_neg_patches = self.convert_patch(neg_patches)
-        converted_candidate_patches = self.convert_patch(self.init_canndidate_set['patches'])
         # Calculate confidence score
-        self.CS_weak = np.zeros(len(converted_candidate_patches), dtype=np.float32)
-        for i, candidate in enumerate(converted_candidate_patches):
+        for i, candidate in enumerate(self.init_img):
             INV_pos = kNN_regression(candidate, converted_pos_patches)
             INV_neg = kNN_regression(candidate, converted_neg_patches)
             self.CS_weak[i] = INV_pos / (INV_pos + INV_neg)
 
         # Find weak candidate set
-        for i, CS in enumerate(self.CS_weak):
-            if CS > WC_threshold:
-                bbox = self.init_canndidate_set['bbox'][i]
-                self.C_weak[i] = bbox
+        indices_C_weak = self.CS_weak > WC_threshold
 
     def calculate_CS_strong(self, patches: np.ndarray, SC_threshold: float):
         pos_patches, neg_patches = patches
         converted_pos_patches = self.convert_patch(pos_patches)
         converted_neg_patches = self.convert_patch(neg_patches)
-        converted_candidate_patches = self.convert_patch(self.init_canndidate_set['patches'])
         # Calculate confidence score
-        self.CS_strong = np.zeros(len(converted_candidate_patches))
-        for i, candidate in enumerate(converted_candidate_patches):
+        self.CS_strong = np.zeros(self.num_candidates)
+        for i, candidate in enumerate(self.init_img):
             INV_neg = kNN_regression(candidate, converted_neg_patches)
             INV_pos = kNN_regression_55_percent(candidate, converted_pos_patches)
             self.CS_strong[i] = INV_pos / (INV_pos + INV_neg)
-        # Find strong candidate set
-        for i, CS in enumerate(self.CS_strong):
-            if CS > SC_threshold:
-                bbox = self.init_canndidate_set['bbox'][i]
-                self.C_strong[i] = bbox
+        indices_C_strong = self.CS_strong > SC_threshold
     def convert_patch(self, patches, target_shape=(128,128)):
         # Convert patches to [0, 1] float32
         converted_patches = []
@@ -247,6 +285,15 @@ class CandidateSet:
             bbox_strong = self.C_strong[key_max]
 
             return bbox_strong
+
+
+
+
+
+
+original_box = [50, 50, 150, 150]  # (x1, y1, x2, y2)
+generated_boxes = generate_boxes(original_box, iou_threshold=0.7, num_boxes=10)
+print(generated_boxes)
 def kNN_regression(candidate: np.ndarray, patches: np.ndarray, k = 5):
     # Compute the Euclidean distance between candidate and each patch
     squared_diff = (patches - candidate) ** 2
@@ -276,43 +323,43 @@ def compute_iou(bbox1: list[int], bbox2: list[int]):
     union_area = w1 * h1 + w2 * h2 - inter_area
     return inter_area/union_area
 
-if __name__ == "__main__":
-    import cv2
-    import os
-    frame = cv2.imread(os.path.join('src_video', '0001.jpg'))
-    model = AppearanceModel(PP_threshold=0.38, NP_threshold=0.70)
-    init_bbox = [808, 308, 80, 100]
-    patch_bbox1 = PatchBox(init_bbox)
-    model.generate_patches(frame=frame, obj=patch_bbox1)
+# if __name__ == "__main__":
+#     import cv2
+#     import os
+#     frame = cv2.imread(os.path.join('src_video', '0001.jpg'))
+#     model = AppearanceModel(PP_threshold=0.38, NP_threshold=0.70)
+#     init_bbox = [808, 308, 80, 100]
+#     patch_bbox1 = PatchBox(init_bbox)
+#     model.generate_patches(frame=frame, obj=patch_bbox1)
     
-    frame2 = cv2.imread(os.path.join('src_video', '0002.jpg'))
-    model.generate_patches(frame=frame2, obj=patch_bbox1)
-    pos_patches, neg_patches = model.get_patches()
-    candidates = CandidateSet(patch_bbox1, frame2, 0.63)
-    candidates.calculate_CS_weak([pos_patches, neg_patches], 0.52)
-    _, bbox = candidates.predict_bbox()
-    if bbox is not None:
-        x1 = bbox[0] - bbox[2]//2
-        y1 = bbox[1] - bbox[3]//2
-        x2 = bbox[0] + bbox[2]//2
-        y2 = bbox[1] + bbox[3]//2
-        cv2.rectangle(frame2, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        cv2.imshow('frame2', frame2)
-        cv2.waitKey(0)
+#     frame2 = cv2.imread(os.path.join('src_video', '0002.jpg'))
+#     model.generate_patches(frame=frame2, obj=patch_bbox1)
+#     pos_patches, neg_patches = model.get_patches()
+#     candidates = CandidateSet(patch_bbox1, frame2, 0.63)
+#     candidates.calculate_CS_weak([pos_patches, neg_patches], 0.52)
+#     _, bbox = candidates.predict_bbox()
+#     if bbox is not None:
+#         x1 = bbox[0] - bbox[2]//2
+#         y1 = bbox[1] - bbox[3]//2
+#         x2 = bbox[0] + bbox[2]//2
+#         y2 = bbox[1] + bbox[3]//2
+#         cv2.rectangle(frame2, (x1, y1), (x2, y2), (0, 255, 0), 2)
+#         cv2.imshow('frame2', frame2)
+#         cv2.waitKey(0)
         
-    frame2 = cv2.imread(os.path.join('src_video', '0003.jpg'))
-    model.generate_patches(frame=frame2, obj=patch_bbox1)
-    pos_patches, neg_patches = model.get_patches()
-    candidates = CandidateSet(patch_bbox1, frame2, 0.63)
-    candidates.calculate_CS_weak([pos_patches, neg_patches], 0.52)
-    _, bbox = candidates.predict_bbox()
-    if bbox is not None:
-        x1 = bbox[0] - bbox[2]//2
-        y1 = bbox[1] - bbox[3]//2
-        x2 = bbox[0] + bbox[2]//2
-        y2 = bbox[1] + bbox[3]//2
-        cv2.rectangle(frame2, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        cv2.imshow('frame2', frame2)
-        cv2.waitKey(0)
+#     frame2 = cv2.imread(os.path.join('src_video', '0003.jpg'))
+#     model.generate_patches(frame=frame2, obj=patch_bbox1)
+#     pos_patches, neg_patches = model.get_patches()
+#     candidates = CandidateSet(patch_bbox1, frame2, 0.63)
+#     candidates.calculate_CS_weak([pos_patches, neg_patches], 0.52)
+#     _, bbox = candidates.predict_bbox()
+#     if bbox is not None:
+#         x1 = bbox[0] - bbox[2]//2
+#         y1 = bbox[1] - bbox[3]//2
+#         x2 = bbox[0] + bbox[2]//2
+#         y2 = bbox[1] + bbox[3]//2
+#         cv2.rectangle(frame2, (x1, y1), (x2, y2), (0, 255, 0), 2)
+#         cv2.imshow('frame2', frame2)
+#         cv2.waitKey(0)
     
     
