@@ -3,28 +3,32 @@ import os
 import time
 from matchers.sparseOptFlow import TrackingBaseOpticalFlow
 
-
 os.environ["QT_QPA_PLATFORM"] = "xcb"
+
 # Load video
-cap = cv2.VideoCapture('tank2.mp4')
+video_and_bbox = {1: ['tank1.mp4', (765, 259, 95, 95)],
+                  2: ['tank2.mp4', (370, 122, 167, 130)],
+                  3: ['tank3.mp4', (284, 92, 228, 124)],
+                  4: ['tank4.mp4', (140, 196, 355, 170)]}
+video, init_bbox = video_and_bbox[1]
+
+cap = cv2.VideoCapture(video)
 
 # Read first frame
 ret, old_frame = cap.read()
 height, width = old_frame.shape[:2]
 
-fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-out = cv2.VideoWriter('output_video.mp4', fourcc, 30.0, (width, height))
+fourcc = cv2.VideoWriter_fourcc(*"XVID")
+out = cv2.VideoWriter('output_video.avi', fourcc, 30.0, (width, height))
 
 
-tracker = TrackingBaseOpticalFlow(threshold=6.)
+tracker = TrackingBaseOpticalFlow(dist_similarity=-0.6, retention_ratio=0.8)
 
 # add cv2_track to compare
 cv2_track = None
-cv2_track = cv2.legacy.TrackerCSRT_create()
+# cv2_track = cv2.legacy.TrackerCSRT_create()
 old_gray = cv2.cvtColor(old_frame, cv2.COLOR_BGR2GRAY)
 
-# init_bbox= (765, 259, 95, 95) # for tank-1.mp4
-init_bbox= (370, 122, 167, 116)   # for tank-2.mp4
 
 tracker.init(old_frame, init_bbox)
 mask = None # show tracklets of features object
@@ -54,6 +58,8 @@ while True:
                 pt1 = (x,y)
                 pt2 = (x + w, y + h)
                 cv2.rectangle(frame, pt1, pt2, (255, 0, 0), 2)
+        for point in tracker.get_points():
+            cv2.circle(frame, point, radius=2, color=(0, 255, 0), thickness=-1)
         # mask = tracker.get_mask()
     if mask is not None:
         img = cv2.add(frame, mask)
